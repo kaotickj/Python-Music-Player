@@ -527,7 +527,7 @@ shuffle["bg"] = black
 shuffle["fg"] = dkgreen
 shuffle["justify"] = "center"
 shuffle["text"] = "Shuffle"
-shuffle.place(x=50, y=420, width=80, height=25)
+shuffle.place(x=280, y=405, width=80, height=15)
 shuffle["command"] = shuffle
 
 loop = tk.Checkbutton(root)
@@ -537,7 +537,7 @@ loop["bg"] = black
 loop["fg"] = dkgreen
 loop["justify"] = "center"
 loop["text"] = "Loop"
-loop.place(x=50, y=450, width=70, height=25)
+loop.place(x=350, y=405, width=70, height=15)
 loop["command"] = loop
 '''
 
