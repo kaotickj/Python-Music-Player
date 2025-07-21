@@ -1,4 +1,5 @@
 import os
+import sys
 import tkinter as tk
 import tkinter.font as tkFont
 from tkinter import *
@@ -6,6 +7,11 @@ from tkinter import filedialog, messagebox
 from PIL import ImageTk, Image
 import pygame
 import json
+import random
+import threading
+from mutagen import File
+from mutagen.id3 import ID3NoHeaderError
+import io
 
 # Initialize pygame.mixer
 pygame.mixer.init()
@@ -34,34 +40,239 @@ dkgray = "#333333"
 playlist = []
 current_song_index = -1
 CATCHPHRASE = "\n \"That\'s no way to treat an\n expensive musical instrument!\"\n"
-LOGO_TEXT = "\n Kaos Tunes, by Kaotickj \n"
+LOGO_TEXT = "\n Kaos Tunes, by Kaotick Jay \n"
+loop_enabled = False
+metadata_title_label = None
+metadata_artist_label = None
+metadata_album_label = None
+current_art_image = None
 
 
 # Functions
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
+def show_default_artwork():
+    global current_art_image
+    img_nowplaying = Image.open(resource_path('assets/logo.png'))
+    img_nowplaying = img_nowplaying.resize((250, 250), Image.LANCZOS)
+    current_art_image = ImageTk.PhotoImage(img_nowplaying)
+    np_image.config(image=current_art_image)
+
+
+def get_song_metadata(audio_path):
+    """
+    Extract title, artist, and album from audio metadata.
+    Returns a tuple (title, artist, album and year). Missing fields return empty string.
+    """
+    title = ""
+    artist = ""
+    album = ""
+    year = ""
+
+    try:
+        audio = File(audio_path)
+        if audio is None or audio.tags is None:
+            return (title, artist, album, year)
+
+        tags = audio.tags
+
+        # Title
+        if 'TIT2' in tags:
+            title = str(tags['TIT2'].text[0])
+
+        # Artist
+        if 'TPE1' in tags:
+            artist = str(tags['TPE1'].text[0])
+
+        # Album
+        if 'TALB' in tags:
+            album = str(tags['TALB'].text[0])
+
+        # Year (prefer TDRC)
+        if 'TDRC' in tags:
+            year = str(tags['TDRC'].text[0])
+        elif 'TYER' in tags:  # fallback
+            year = str(tags['TYER'].text[0])
+
+    except Exception as e:
+        print(f"[!] Error reading metadata from {audio_path}: {e}")
+
+    return (title, artist, album, year)
+
+
+def extract_embedded_artwork(audio_path):
+    """
+    Extract embedded album art from audio file metadata using mutagen.
+    Returns a PIL Image object or None if not found.
+    """
+
+    try:
+        audio = File(audio_path)
+        if audio is None:
+            return None
+
+        # For MP3 with ID3 tags:
+        if hasattr(audio, 'tags') and audio.tags is not None:
+            for tag in audio.tags.values():
+                if tag.FrameID == 'APIC':  # ID3 album art frame
+                    img_data = tag.data
+                    image = Image.open(io.BytesIO(img_data))
+                    return image
+
+        # For FLAC or other formats:
+        if 'metadata_blocks' in dir(audio) and audio.metadata_blocks is not None:
+            for block in audio.metadata_blocks:
+                if block.__class__.__name__ == 'Picture':
+                    img_data = block.data
+                    image = Image.open(io.BytesIO(img_data))
+                    return image
+
+    except Exception as e:
+        print(f"[!] Error extracting embedded artwork: {e}")
+
+    return None
+
+
+def update_now_playing_artwork_for_song(song_path):
+    global img_nowplaying, np_image
+
+    default_art_path = resource_path('assets/logo.png')
+    album_dir = os.path.dirname(song_path)
+
+    # Try extracting embedded artwork first
+    embedded_image = extract_embedded_artwork(song_path)
+
+    if embedded_image:
+        try:
+            img_nowplaying = embedded_image.resize((250, 250), Image.LANCZOS)
+            img_nowplaying = ImageTk.PhotoImage(img_nowplaying)
+            np_image.config(image=img_nowplaying)
+            np_image.image = img_nowplaying
+            return
+        except Exception as e:
+            print(f"[!] Failed to use embedded artwork: {e}")
+
+    # Then check for folder.jpg (case insensitive)
+    candidate_names = ['folder.jpg', 'Folder.jpg', 'FOLDER.JPG']
+    album_art_path = None
+    for filename in candidate_names:
+        possible_path = os.path.join(album_dir, filename)
+        if os.path.isfile(possible_path):
+            album_art_path = possible_path
+            break
+
+    if album_art_path:
+        try:
+            img_nowplaying = Image.open(album_art_path)
+            img_nowplaying = img_nowplaying.resize((250, 250), Image.LANCZOS)
+            img_nowplaying = ImageTk.PhotoImage(img_nowplaying)
+            np_image.config(image=img_nowplaying)
+            np_image.image = img_nowplaying
+            return
+        except Exception as e:
+            print(f"[!] Failed to load folder.jpg artwork: {e}")
+
+    # Finally fallback to default logo
+    try:
+        img_nowplaying = Image.open(default_art_path)
+        img_nowplaying = img_nowplaying.resize((250, 250), Image.LANCZOS)
+        img_nowplaying = ImageTk.PhotoImage(img_nowplaying)
+        np_image.config(image=img_nowplaying)
+        np_image.image = img_nowplaying
+    except Exception as e:
+        print(f"[!] Failed to load fallback logo: {e}")
+
+
 def play_music(event=None):
     global current_song_index
+
     selected = listbox.curselection()
     if not selected:
-        messagebox.showinfo("No song chosen", "Oops! You need to choose a song to play first.\n\nHint: Open a music "
-                                              "file or load a playlist from the \"file\" menu to get started, "
-                                              "then choose a song in the playlist before clicking play")
-        return  # No item is selected, exit the function
+        messagebox.showinfo(
+            "No song chosen",
+            "Oops! You need to choose a song to play first.\n\nHint: Open a music "
+            "file or load a playlist from the \"file\" menu to get started, "
+            "then choose a song in the playlist before clicking play"
+        )
+        return
 
-    current_song_index = selected[0]
+    index = selected[0]
 
-    running = playlist[current_song_index]
-    running_song['text'] = running
-    pygame.mixer.music.load(running)
-    pygame.mixer.music.play()
+    if playlist[index] == "Please load a file/playlist":
+        messagebox.showinfo(
+            "No song chosen",
+            "Please load a music file or playlist before playing."
+        )
+        return
 
-    # Bind the 'music_end' event to the next_song function
-    pygame.mixer.music.set_endevent(pygame.USEREVENT + 1)
-    root.after(1000, check_music_end)
+    if index < 0 or index >= len(playlist):
+        messagebox.showerror(
+            "Invalid selection",
+            f"The selected index ({index}) does not match any song in the playlist (size: {len(playlist)})."
+        )
+        return
+
+    current_song_index = index
+    song_path = playlist[current_song_index]
+
+    try:
+        pygame.mixer.music.load(song_path)
+        pygame.mixer.music.play()
+
+        running_song['text'] = os.path.basename(song_path)
+
+        update_now_playing_artwork_for_song(song_path)
+
+        title, artist, album, year = get_song_metadata(song_path)
+        metadata_title_label['text'] = f" {title or 'Unknown'}"
+        metadata_artist_label['text'] = f" {artist or 'Unknown'}"
+        metadata_album_label['text'] = f" {album or 'Unknown'} ({year})" if year else f"{album or 'Unknown'}"
+
+        pygame.mixer.music.set_endevent(pygame.USEREVENT + 1)
+        root.after(1000, check_music_end)
+
+    except Exception as e:
+        messagebox.showerror("Playback Error", f"Failed to play the selected track:\n{str(e)}")
 
 
 # Function to handle the end of a song
 def handle_song_end():
     next_music()
+
+
+def shuffle():
+    global playlist, current_song_index
+
+    if not playlist:
+        messagebox.showinfo("Shuffle", "Playlist is empty. Please load songs first.")
+        return
+
+    # Shuffle playlist list in-place
+    random.shuffle(playlist)
+
+    # Clear the listbox and repopulate with basenames
+    listbox.delete(0, END)
+    for song_path in playlist:
+        listbox.insert(END, os.path.basename(song_path))
+
+    # Set current song index to 0 (first in shuffled list)
+    current_song_index = 0
+    listbox.select_clear(0, END)  # Clear any previous selection
+    listbox.select_set(current_song_index)  # Select first item
+    listbox.activate(current_song_index)  # Focus on first item
+
+    # Update label with currently playing song basename
+    running_song['text'] = os.path.basename(playlist[current_song_index])
+
+    # Play the first song in the shuffled playlist
+    play_music()
 
 
 # Update the check_music_end function
@@ -82,27 +293,35 @@ def continue_music():
 
 def stop_music():
     global current_song_index
-    prev_song_index = current_song_index - 1  # Get the index of the previously playing song
+    #    prev_song_index = current_song_index - 1  # Get the index of the previously playing song
 
-    pygame.mixer.music.stop()
+    #    pygame.mixer.music.stop()
+
+    if pygame.mixer.music.get_busy():
+        # current_song_index = prev_song_index
+        pygame.mixer.music.stop()
+    pygame.event.clear(pygame.USEREVENT + 1)
     listbox.select_clear(0, END)
 
-    # Reset the current song index to the previously playing song index
-    if prev_song_index >= 0:
-        current_song_index = prev_song_index
-
-    listbox.select_set(current_song_index)
-    listbox.activate(current_song_index)
-    running_song['text'] = listbox.get(current_song_index)
+    # listbox.select_set(current_song_index)
+    # listbox.activate(current_song_index)
+    # running_song['text'] = listbox.get(current_song_index)
+    running_song['text'] = "Playback stopped. Choose a song to play."
+    metadata_title_label['text'] = ""
+    metadata_artist_label['text'] = ""
+    metadata_album_label['text'] = ""
 
 
 def next_music():
-    global current_song_index
+    global current_song_index, loop_enabled
+
     current_song_index += 1
-    print("Current song index:", current_song_index)
-    print("Number of songs:", len(playlist))
     if current_song_index >= len(playlist):
-        current_song_index = 0
+        if loop_enabled:
+            current_song_index = 0
+        else:
+            stop_music()
+            return
 
     playing = playlist[current_song_index]
     pygame.mixer.music.load(playing)
@@ -111,7 +330,14 @@ def next_music():
     listbox.select_clear(0, END)
     listbox.select_set(current_song_index)
     listbox.activate(current_song_index)
-    running_song['text'] = playing
+    running_song['text'] = os.path.basename(playing)
+
+    # Update artwork and metadata
+    update_now_playing_artwork_for_song(playing)
+    title, artist, album, year = get_song_metadata(playing)
+    metadata_title_label['text'] = f" {title or 'Unknown'}"
+    metadata_artist_label['text'] = f" {artist or 'Unknown'}"
+    metadata_album_label['text'] = f" {album or 'Unknown'} ({year})" if year else f"{album or 'Unknown'}"
 
 
 def previous_music():
@@ -134,7 +360,14 @@ def previous_music():
     listbox.select_clear(0, END)
     listbox.select_set(current_song_index)
     listbox.activate(current_song_index)
-    running_song['text'] = playing
+    running_song['text'] = os.path.basename(playing)
+
+    # Update artwork and metadata
+    update_now_playing_artwork_for_song(playing)
+    title, artist, album, year = get_song_metadata(playing)
+    metadata_title_label['text'] = f" {title or 'Unknown'}"
+    metadata_artist_label['text'] = f" {artist or 'Unknown'}"
+    metadata_album_label['text'] = f" {album or 'Unknown'} ({year})" if year else f"{album or 'Unknown'}"
 
 
 def remove_song():
@@ -172,11 +405,15 @@ def load_file():
         filetypes=filetypes
     )
     valid_extensions = (".mp3", ".wav", ".flac", ".ogg")
-    if filepath and os.path.isfile(filepath) and filepath.endswith(valid_extensions):
-        #listbox.delete(0, END)  # Clear the current playlist
-        #playlist.clear()  # Clear the playlist list
-        listbox.insert(END, filepath)
+
+    if filepath and os.path.isfile(filepath) and filepath.lower().endswith(valid_extensions):
+        # Remove placeholder if it exists
+        if playlist and playlist[0] == "Please load a file/playlist":
+            playlist.clear()
+            listbox.delete(0, END)
+
         playlist.append(filepath)
+        listbox.insert(END, os.path.basename(filepath))
 
 
 def load_playlist():
@@ -194,37 +431,39 @@ def load_playlist():
         playlist.clear()  # Clear the playlist list
 
         for item in loaded_playlist:
-            listbox.insert(END, item)
-            playlist.append(item)
+            playlist.append(item)  # Keep full path for playback
+            listbox.insert(END, os.path.basename(item))  # Insert only basename in listbox
 
-        # Set the first song in the playlist as the current song
+        global current_song_index
         current_song_index = 0
         running_song['text'] = "Pick a tune from the Playlist"
 
 
 def save_playlist():
     filetypes = [("Playlist files", "*.json")]
-    directory = os.path.join(os.getcwd(), "../playlists")
+    directory = os.path.join(os.getcwd(), "playlists")
     if not os.path.exists(directory):
         os.makedirs(directory)
-    root.withdraw()  # Hide the main window temporarily
+
+    root.withdraw()  # Temporarily hide the window
     filepath = filedialog.asksaveasfilename(
         initialdir=directory,
         title="Save Playlist",
         filetypes=filetypes,
         defaultextension=".json"
     )
-    root.deiconify()  # Show the main window again
+    root.deiconify()  # Restore the window
 
     if filepath:
-        playlist = listbox.get(0, END)
         playlist_data = {"playlist": playlist}
 
-        with open(filepath, "w") as file:
-            json.dump(playlist_data, file)
+        try:
+            with open(filepath, "w") as file:
+                json.dump(playlist_data, file)
 
-        messagebox.showinfo("Playlist saved",
-                            "Playlist was saved successfully.")
+            messagebox.showinfo("Playlist saved", "Playlist was saved successfully.")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not save playlist:\n{e}")
 
 
 def clear_playlist():
@@ -291,35 +530,51 @@ def about_kaos():
         "About Kaos Tunes",
         "Kaos Tunes is a simple music player application.\n"
         "Version: 1.0\n"
-        "Developed by: KaotickJ\n"
+        "Developed by: Kaotick Jay\n"
         "Website: www.github.com/kaotickj"
     )
 
 
 def show():
-    listbox.delete(0, END)  # Clear the current contents of the listbox
+    listbox.delete(0, END)
 
-    for i, song in enumerate(playlist):
-        listbox.insert(END, song)
-
-    if playlist:
+    if not playlist:
+        placeholder = "Please load a file/playlist"
+        playlist.append(placeholder)
+        listbox.insert(END, placeholder)
         global current_song_index
-        current_song_index = 0 if len(playlist) > 0 else -1  # Update current_song_index based on the loaded playlist
+        current_song_index = -1
+        return
+
+    for song in playlist:
+        if isinstance(song, str) and os.path.isfile(song):
+            listbox.insert(END, os.path.basename(song))
+        else:
+            listbox.insert(END, str(song))
+
+    current_song_index = 0 if len(playlist) > 0 else -1
+    if current_song_index >= 0:
+        listbox.select_set(current_song_index)
+        listbox.activate(current_song_index)
 
 
-def shuffle():
-    pass
+def toggle_loop():
+    global loop_enabled
+    loop_enabled = loop_var.get()
+    status = "enabled" if loop_enabled else "disabled"
+    # Optionally update a status label or just print
+    print(f"Loop mode {status}.")
+    # messagebox.showinfo("Loop Mode", f"Loop mode {status}.")
 
 
-def loop():
-    pass
+# def loop():
+#    pass
 
 
 root = Tk()
 root.title(" KaoS Tunes 🎸")
-# setting window size
 width = 700
-height = 500
+height = 550
 screenwidth = root.winfo_screenwidth()
 screenheight = root.winfo_screenheight()
 alignstr = '%dx%d+%d+%d' % (width, height, (screenwidth - width) / 2, (screenheight - height) / 2)
@@ -328,20 +583,43 @@ root.resizable(width=False, height=False)
 root.configure(bg=black)
 root.resizable(width=FALSE, height=FALSE)
 
-# Load the image for the window icon
-icon_image = Image.open("assets/play.png")
-icon_photo = ImageTk.PhotoImage(icon_image)
+# Set cross-platform compatible icon
+icon_path_ico = resource_path("icon.ico")
+icon_path_png = resource_path("icon.png")
 
-# Set the window icon
-root.iconphoto(True, icon_photo)
+# Set icon depending on OS
+if sys.platform.startswith("win"):
+    try:
+        root.iconbitmap(icon_path_ico)
+    except Exception as e:
+        print(f"[!] Could not load .ico icon: {e}")
+else:
+    try:
+        icon_image = Image.open(icon_path_png)
+        icon_photo = ImageTk.PhotoImage(icon_image)
+        root.iconphoto(True, icon_photo)
+    except Exception as e:
+        pass
+
+container_width = 280
+container_height = 280
+
+image_width = 250
+image_height = 250
+
+x_pos = (container_width - image_width) // 2  # 15
+y_pos = (container_height - image_height) // 2  # 15
 
 playlist_frame = tk.Frame(root)
 playlist_frame["bg"] = dkgray
 playlist_frame.place(x=20, y=30, width=309, height=339)
 
 artwork_frame = tk.Label(root)
-artwork_frame["bg"] = blue
+artwork_frame["bg"] = black
 artwork_frame.place(x=330, y=30, width=349, height=339)
+# Container inside artwork_frame for album art and metadata
+artwork_container = tk.Frame(artwork_frame, bg=black)
+artwork_container.place(x=30, y=5, width=280, height=322)
 
 controls_frame = tk.Frame(root)
 controls_frame["bg"] = black
@@ -349,44 +627,54 @@ controls_frame.place(x=20, y=370, width=660, height=126)
 
 # ***** SETUP IMAGES *****
 # now playing
-img_nowplaying = Image.open('assets/logo.png')
-img_nowplaying = img_nowplaying.resize((280, 280))
+img_nowplaying = Image.open(resource_path('assets/logo.png'))
+img_nowplaying = img_nowplaying.resize((250, 250), Image.LANCZOS)
 img_nowplaying = ImageTk.PhotoImage(img_nowplaying)
-np_image = tk.Label(artwork_frame, height=280, image=img_nowplaying, bg=black, padx=10)
-np_image.place(x=30, y=20)
+np_image = tk.Label(artwork_container, bg=black)
+np_image.place(x=x_pos, y=y_pos, width=image_width, height=image_height)
+show_default_artwork()
+
+metadata_title_label = tk.Label(artwork_frame, bg='black', fg=green, font=('Arial', 10, 'bold'), anchor='w')
+metadata_title_label.place(x=35, y=271, width=275, height=18)
+
+metadata_artist_label = tk.Label(artwork_frame, bg='black', fg=green, font=('Arial', 10), anchor='w')
+metadata_artist_label.place(x=35, y=289, width=275, height=18)
+
+metadata_album_label = tk.Label(artwork_frame, bg='black', fg=green, font=('Arial', 10), anchor='w')
+metadata_album_label.place(x=35, y=307, width=275, height=18)
 
 # remove from playlist
-img_playlist_del = Image.open('assets/del-from-list-wht.png')
+img_playlist_del = Image.open(resource_path('assets/del-from-list-wht.png'))
 img_playlist_del = img_playlist_del.resize((20, 20))
 img_playlist_del = ImageTk.PhotoImage(img_playlist_del)
 
 # previous
-img_back = Image.open('assets/back.png')
+img_back = Image.open(resource_path('assets/back.png'))
 img_back = img_back.resize((40, 40))
 img_back = ImageTk.PhotoImage(img_back)
 
 # play
-img_play = Image.open('assets/play.png')
+img_play = Image.open(resource_path('assets/play.png'))
 img_play = img_play.resize((40, 40))
 img_play = ImageTk.PhotoImage(img_play)
 
 # pause
-img_pause = Image.open('assets/pause.png')
+img_pause = Image.open(resource_path('assets/pause.png'))
 img_pause = img_pause.resize((40, 40))
 img_pause = ImageTk.PhotoImage(img_pause)
 
 # resume
-img_resume = Image.open('assets/resume.png')
+img_resume = Image.open(resource_path('assets/resume.png'))
 img_resume = img_resume.resize((40, 40))
 img_resume = ImageTk.PhotoImage(img_resume)
 
 # stop
-img_stop = Image.open('assets/stop.png')
+img_stop = Image.open(resource_path('assets/stop.png'))
 img_stop = img_stop.resize((40, 40))
 img_stop = ImageTk.PhotoImage(img_stop)
 
 # next
-img_forward = Image.open('assets/skip.png')
+img_forward = Image.open(resource_path('assets/skip.png'))
 img_forward = img_forward.resize((40, 40))
 img_forward = ImageTk.PhotoImage(img_forward)
 
@@ -398,7 +686,7 @@ img_llamas_head = ImageTk.PhotoImage(img_llamas_head)
 '''
 
 # The Llama's Ass
-img_llamas_ass = Image.open('assets/koz-logo.png')
+img_llamas_ass = Image.open(resource_path('assets/koz-logo.png'))
 img_llamas_ass = img_llamas_ass.resize((80, 80))
 img_llamas_ass = ImageTk.PhotoImage(img_llamas_ass)
 
@@ -417,7 +705,7 @@ running_song.place(x=0, y=0, width=661, height=32)
 # **** SETUP BUTTONS *****
 # Remove from playlist button
 remove_button = tk.Button(root)
-remove_button["bg"] = black #"#e9e9ed"
+remove_button["bg"] = black  # "#e9e9ed"
 remove_button["justify"] = "center"
 remove_button["image"] = img_playlist_del
 remove_button.place(x=650, y=372, width=30, height=30)
@@ -468,7 +756,7 @@ stop_button["fg"] = black
 stop_button["justify"] = "center"
 stop_button["image"] = img_stop
 stop_button.place(x=410, y=420, width=60, height=60)
-stop_button["command"] = pause_music
+stop_button["command"] = stop_music
 
 # skip/forward button
 skip_button = tk.Button(root)
@@ -489,9 +777,6 @@ listbox["fg"] = green
 listbox["justify"] = "left"
 listbox.place(x=0, y=0, width=308, height=339)
 def_txt = "  Please load a file/playlist"
-a = []
-playlist.append(a)
-playlist.append(def_txt)
 
 w = Scrollbar(playlist_frame, orient="vertical", command=listbox.yview)
 w.grid(row=0, column=1, sticky=NSEW)
@@ -529,17 +814,17 @@ shuffle["justify"] = "center"
 shuffle["text"] = "Shuffle"
 shuffle.place(x=280, y=405, width=80, height=15)
 shuffle["command"] = shuffle
-
-loop = tk.Checkbutton(root)
-ft = tkFont.Font(family='Arial', size=10)
-loop["font"] = ft
-loop["bg"] = black
-loop["fg"] = dkgreen
-loop["justify"] = "center"
-loop["text"] = "Loop"
-loop.place(x=350, y=405, width=70, height=15)
-loop["command"] = loop
 '''
+loop_var = tk.BooleanVar(value=False)
+
+loop_checkbox = tk.Checkbutton(root, text="Loop", bg=black, fg=dkgreen,
+                               font=('Arial', 10), relief=tk.RAISED, borderwidth=2, variable=loop_var,
+                               command=toggle_loop)
+loop_checkbox["bg"] = black  # "#e9e9ed"
+loop_checkbox["justify"] = "center"
+loop_checkbox.place(x=580, y=371, width=70, height=30)
+create_tooltip(loop_checkbox,
+               "Loop the current playlist")
 
 # Create the menubar
 menubar = tk.Menu(root)
@@ -555,6 +840,7 @@ file_menu.add_separator()
 file_menu.add_command(label="Load Playlist", command=load_playlist)
 file_menu.add_command(label="Save Playlist", command=save_playlist)
 file_menu.add_command(label="Clear Playlist", command=clear_playlist)
+file_menu.add_command(label="Shuffle Playlist", command=shuffle)
 file_menu.add_separator()
 file_menu.add_command(label="Close", command=close_app)
 
@@ -565,12 +851,9 @@ menubar.add_cascade(label="Help", menu=help_menu)
 # Add help menu options
 help_menu.add_command(label="About Kaos Tunes", command=about_kaos)
 
-os.chdir(r'music')
-songs = os.listdir()
-
 music_state = StringVar()
 music_state.set("Choose one!")
-show()
 
 if __name__ == "__main__":
+    show()
     root.mainloop()
