@@ -11,7 +11,10 @@ import random
 import threading
 from mutagen import File
 from mutagen.id3 import ID3NoHeaderError
+from mutagen.mp3 import MP3
 import io
+
+
 
 # Initialize pygame.mixer
 pygame.mixer.init()
@@ -45,7 +48,8 @@ loop_enabled = False
 metadata_title_label = None
 metadata_artist_label = None
 metadata_album_label = None
-current_art_image = None
+current_art_image = None 
+play_thread = None
 
 
 # Functions
@@ -57,14 +61,12 @@ def resource_path(relative_path):
 
     return os.path.join(base_path, relative_path)
 
-
 def show_default_artwork():
     global current_art_image
     img_nowplaying = Image.open(resource_path('assets/logo.png'))
     img_nowplaying = img_nowplaying.resize((250, 250), Image.LANCZOS)
     current_art_image = ImageTk.PhotoImage(img_nowplaying)
     np_image.config(image=current_art_image)
-
 
 def get_song_metadata(audio_path):
     """
@@ -105,8 +107,6 @@ def get_song_metadata(audio_path):
         print(f"[!] Error reading metadata from {audio_path}: {e}")
 
     return (title, artist, album, year)
-
-
 def extract_embedded_artwork(audio_path):
     """
     Extract embedded album art from audio file metadata using mutagen.
@@ -138,7 +138,6 @@ def extract_embedded_artwork(audio_path):
         print(f"[!] Error extracting embedded artwork: {e}")
 
     return None
-
 
 def update_now_playing_artwork_for_song(song_path):
     global img_nowplaying, np_image
@@ -189,9 +188,13 @@ def update_now_playing_artwork_for_song(song_path):
     except Exception as e:
         print(f"[!] Failed to load fallback logo: {e}")
 
-
 def play_music(event=None):
+    global play_thread
     global current_song_index
+
+    if play_thread is None or not play_thread.is_alive():
+        play_thread = threading.Thread(target=r, daemon=True)
+        play_thread.start()
 
     selected = listbox.curselection()
     if not selected:
@@ -226,6 +229,26 @@ def play_music(event=None):
         pygame.mixer.music.load(song_path)
         pygame.mixer.music.play()
 
+        # Duration and progress bar setup
+        try:
+            audio = File(song_path)
+            duration = audio.info.length if audio and audio.info else 0
+        except Exception:
+            duration = 0
+
+        if not duration:
+            try:
+                sound = pygame.mixer.Sound(song_path)
+                duration = sound.get_length()
+            except Exception:
+                duration = 0
+
+        progress_bar.config(to=duration)
+        progress_var.set(0)
+        time_label.config(text=f"0:00 / {format_time(duration)}")
+
+        update_progress_bar()
+
         running_song['text'] = os.path.basename(song_path)
 
         update_now_playing_artwork_for_song(song_path)
@@ -241,10 +264,21 @@ def play_music(event=None):
     except Exception as e:
         messagebox.showerror("Playback Error", f"Failed to play the selected track:\n{str(e)}")
 
+def update_progress_bar():
+    if pygame.mixer.music.get_busy():
+        pos = pygame.mixer.music.get_pos() / 1000  # milliseconds to seconds
+        total = progress_bar.cget("to")
+        if pos >= total:
+            pos = total
+        progress_var.set(pos)
+        time_label.config(text=f"{format_time(pos)} / {format_time(total)}")
+    root.after(1000, update_progress_bar)
+
 
 # Function to handle the end of a song
 def handle_song_end():
     next_music()
+
 
 
 def shuffle():
@@ -264,16 +298,15 @@ def shuffle():
 
     # Set current song index to 0 (first in shuffled list)
     current_song_index = 0
-    listbox.select_clear(0, END)  # Clear any previous selection
+    listbox.select_clear(0, END)             # Clear any previous selection
     listbox.select_set(current_song_index)  # Select first item
-    listbox.activate(current_song_index)  # Focus on first item
+    listbox.activate(current_song_index)    # Focus on first item
 
     # Update label with currently playing song basename
     running_song['text'] = os.path.basename(playlist[current_song_index])
 
     # Play the first song in the shuffled playlist
-    play_music()
-
+    play_music()    
 
 # Update the check_music_end function
 def check_music_end():
@@ -293,14 +326,14 @@ def continue_music():
 
 def stop_music():
     global current_song_index
-    #    prev_song_index = current_song_index - 1  # Get the index of the previously playing song
+#    prev_song_index = current_song_index - 1  # Get the index of the previously playing song
 
-    #    pygame.mixer.music.stop()
+#    pygame.mixer.music.stop()
 
     if pygame.mixer.music.get_busy():
         # current_song_index = prev_song_index
         pygame.mixer.music.stop()
-    pygame.event.clear(pygame.USEREVENT + 1)
+    pygame.event.clear(pygame.USEREVENT + 1)    
     listbox.select_clear(0, END)
 
     # listbox.select_set(current_song_index)
@@ -310,7 +343,6 @@ def stop_music():
     metadata_title_label['text'] = ""
     metadata_artist_label['text'] = ""
     metadata_album_label['text'] = ""
-
 
 def next_music():
     global current_song_index, loop_enabled
@@ -338,6 +370,25 @@ def next_music():
     metadata_title_label['text'] = f" {title or 'Unknown'}"
     metadata_artist_label['text'] = f" {artist or 'Unknown'}"
     metadata_album_label['text'] = f" {album or 'Unknown'} ({year})" if year else f"{album or 'Unknown'}"
+
+    try:
+        audio = File(playing)
+        duration = audio.info.length if audio and audio.info else 0
+    except Exception:
+        duration = 0
+
+    if not duration:
+        try:
+            sound = pygame.mixer.Sound(playing)
+            duration = sound.get_length()
+        except Exception:
+            duration = 0
+
+    progress_bar.config(to=duration)
+    progress_var.set(0)
+    time_label.config(text=f"0:00 / {format_time(duration)}")
+
+    update_progress_bar()
 
 
 def previous_music():
@@ -405,16 +456,15 @@ def load_file():
         filetypes=filetypes
     )
     valid_extensions = (".mp3", ".wav", ".flac", ".ogg")
-
+    
     if filepath and os.path.isfile(filepath) and filepath.lower().endswith(valid_extensions):
         # Remove placeholder if it exists
         if playlist and playlist[0] == "Please load a file/playlist":
             playlist.clear()
             listbox.delete(0, END)
-
+        
         playlist.append(filepath)
         listbox.insert(END, os.path.basename(filepath))
-
 
 def load_playlist():
     global playlist
@@ -437,6 +487,7 @@ def load_playlist():
         global current_song_index
         current_song_index = 0
         running_song['text'] = "Pick a tune from the Playlist"
+
 
 
 def save_playlist():
@@ -471,7 +522,6 @@ def clear_playlist():
     messagebox.showinfo("Playlist cleared.",
                         "Playlist has been cleared."
                         )
-
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -556,8 +606,6 @@ def show():
     if current_song_index >= 0:
         listbox.select_set(current_song_index)
         listbox.activate(current_song_index)
-
-
 def toggle_loop():
     global loop_enabled
     loop_enabled = loop_var.get()
@@ -566,6 +614,10 @@ def toggle_loop():
     print(f"Loop mode {status}.")
     # messagebox.showinfo("Loop Mode", f"Loop mode {status}.")
 
+def format_time(seconds):
+    minutes = int(seconds) // 60
+    sec = int(seconds) % 60
+    return f"{minutes}:{sec:02d}"
 
 # def loop():
 #    pass
@@ -600,6 +652,7 @@ else:
         root.iconphoto(True, icon_photo)
     except Exception as e:
         pass
+
 
 container_width = 280
 container_height = 280
@@ -681,13 +734,13 @@ img_forward = ImageTk.PhotoImage(img_forward)
 '''
 # The Llama's Head
 img_llamas_head = Image.open('assets/koz-logo.png')
-img_llamas_head = img_llamas_head.resize((80, 80))
+img_llamas_head = img_llamas_head.resize((90, 90))
 img_llamas_head = ImageTk.PhotoImage(img_llamas_head)
 '''
 
 # The Llama's Ass
 img_llamas_ass = Image.open(resource_path('assets/koz-logo.png'))
-img_llamas_ass = img_llamas_ass.resize((80, 80))
+img_llamas_ass = img_llamas_ass.resize((90, 90))
 img_llamas_ass = ImageTk.PhotoImage(img_llamas_ass)
 
 # Currently playing song label
@@ -702,10 +755,21 @@ running_song["text"] = " Load a song or playlist to listen"
 running_song["relief"] = "sunken"
 running_song.place(x=0, y=0, width=661, height=32)
 
+# Progress bar and duration
+progress_var = tk.DoubleVar()
+progress_bar = tk.Scale(controls_frame, variable=progress_var, from_=0, to=100, orient=HORIZONTAL,
+                        showvalue=False, length=400, sliderlength=10, troughcolor=dkgray,
+                        fg=green, bg=black, highlightthickness=0)
+progress_bar.place(x=130, y=35)
+
+time_label = tk.Label(controls_frame, text="0:00 / 0:00", bg=black, fg=green, font=('Arial', 9))
+time_label.place(x=540, y=35)
+
+
 # **** SETUP BUTTONS *****
 # Remove from playlist button
 remove_button = tk.Button(root)
-remove_button["bg"] = black  # "#e9e9ed"
+remove_button["bg"] = black #"#e9e9ed"
 remove_button["justify"] = "center"
 remove_button["image"] = img_playlist_del
 remove_button.place(x=650, y=372, width=30, height=30)
@@ -719,7 +783,7 @@ back_button["bg"] = dkbtn
 back_button["fg"] = black
 back_button["justify"] = "center"
 back_button["image"] = img_back
-back_button.place(x=170, y=420, width=60, height=60)
+back_button.place(x=170, y=430, width=60, height=60)
 back_button["command"] = previous_music
 
 # play button
@@ -728,7 +792,7 @@ play_button["bg"] = dkbtn
 play_button["fg"] = black
 play_button["justify"] = "center"
 play_button["image"] = img_play
-play_button.place(x=230, y=420, width=60, height=60)
+play_button.place(x=230, y=430, width=60, height=60)
 play_button["command"] = play_music
 
 # Pause button
@@ -737,7 +801,7 @@ pause_button["bg"] = dkbtn
 pause_button["fg"] = black
 pause_button["justify"] = "center"
 pause_button["image"] = img_pause
-pause_button.place(x=290, y=420, width=60, height=60)
+pause_button.place(x=290, y=430, width=60, height=60)
 pause_button["command"] = pause_music
 
 # Resume button
@@ -746,7 +810,7 @@ resume_button["bg"] = dkbtn
 resume_button["fg"] = black
 resume_button["justify"] = "center"
 resume_button["image"] = img_resume
-resume_button.place(x=350, y=420, width=60, height=60)
+resume_button.place(x=350, y=430, width=60, height=60)
 resume_button["command"] = continue_music
 
 # stop button
@@ -755,7 +819,7 @@ stop_button["bg"] = dkbtn
 stop_button["fg"] = black
 stop_button["justify"] = "center"
 stop_button["image"] = img_stop
-stop_button.place(x=410, y=420, width=60, height=60)
+stop_button.place(x=410, y=430, width=60, height=60)
 stop_button["command"] = stop_music
 
 # skip/forward button
@@ -764,7 +828,7 @@ skip_button["bg"] = dkbtn
 skip_button["fg"] = black
 skip_button["justify"] = "center"
 skip_button["image"] = img_forward
-skip_button.place(x=470, y=420, width=60, height=60)
+skip_button.place(x=470, y=430, width=60, height=60)
 skip_button["command"] = next_music
 
 listbox = tk.Listbox(playlist_frame)
@@ -784,13 +848,13 @@ w.grid(row=0, column=1, sticky=NSEW)
 listbox.config(yscrollcommand=w.set)
 w.pack(side="right", fill="y")
 
-# create the llama's ass
+# create the llama's head
 llamas_head = tk.Label(root)
 llamas_head["bg"] = "#000000"
 llamas_head["fg"] = dkgray
 llamas_head["justify"] = "center"
 llamas_head["image"] = img_llamas_ass
-llamas_head.place(x=40, y=405)
+llamas_head.place(x=40, y=415)
 create_tooltip(llamas_head,
                LOGO_TEXT)
 
@@ -800,7 +864,7 @@ llamas_ass["bg"] = "#000000"
 llamas_ass["fg"] = dkgray
 llamas_ass["justify"] = "center"
 llamas_ass["image"] = img_llamas_ass
-llamas_ass.place(x=570, y=410, width=70, height=70)
+llamas_ass.place(x=570, y=425, width=70, height=70)
 create_tooltip(llamas_ass,
                CATCHPHRASE)
 
@@ -820,7 +884,7 @@ loop_var = tk.BooleanVar(value=False)
 loop_checkbox = tk.Checkbutton(root, text="Loop", bg=black, fg=dkgreen,
                                font=('Arial', 10), relief=tk.RAISED, borderwidth=2, variable=loop_var,
                                command=toggle_loop)
-loop_checkbox["bg"] = black  # "#e9e9ed"
+loop_checkbox["bg"] = black #"#e9e9ed"
 loop_checkbox["justify"] = "center"
 loop_checkbox.place(x=580, y=371, width=70, height=30)
 create_tooltip(loop_checkbox,
@@ -850,6 +914,7 @@ menubar.add_cascade(label="Help", menu=help_menu)
 
 # Add help menu options
 help_menu.add_command(label="About Kaos Tunes", command=about_kaos)
+
 
 music_state = StringVar()
 music_state.set("Choose one!")
