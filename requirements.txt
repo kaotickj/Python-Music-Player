@@ -3,3 +3,4 @@
 Pillow
 pygame
 mutagen
+tkinterdnd2
