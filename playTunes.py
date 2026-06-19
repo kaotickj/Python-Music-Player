@@ -14,6 +14,12 @@ from mutagen.id3 import ID3NoHeaderError
 from mutagen.mp3 import MP3
 import io
 
+try:
+    from tkinterdnd2 import DND_FILES, tkinterdnd
+except ImportError:
+    tkinterdnd = None
+    DND_FILES = None
+
 pygame.mixer.init()
 pygame.display.init()
 
@@ -498,6 +504,41 @@ def clear_playlist():
                         )
 
 
+def handle_drop(event):
+    """Handle files dropped onto the listbox."""
+    files = listbox.tk.splitlist(event.data)
+    valid_extensions = (".mp3", ".wav", ".flac", ".ogg")
+    
+    # Check if we need to clear the placeholder
+    if playlist and playlist[0] == "Please load a file/playlist":
+        playlist.clear()
+        listbox.delete(0, END)
+    
+    added_files = []
+    for file_path in files:
+        # Remove curly braces if present (Windows sometimes wraps paths in braces)
+        file_path = file_path.strip('{}')
+        
+        # Check if it's a file and has a valid audio extension
+        if os.path.isfile(file_path) and file_path.lower().endswith(valid_extensions):
+            playlist.append(file_path)
+            listbox.insert(END, os.path.basename(file_path))
+            added_files.append(os.path.basename(file_path))
+        # Check if it's a directory and recursively add audio files
+        elif os.path.isdir(file_path):
+            for root_dir, dirs, file_list in os.walk(file_path):
+                for filename in file_list:
+                    if filename.lower().endswith(valid_extensions):
+                        full_path = os.path.join(root_dir, filename)
+                        playlist.append(full_path)
+                        listbox.insert(END, os.path.basename(filename))
+                        added_files.append(os.path.basename(filename))
+    
+    if added_files:
+        messagebox.showinfo("Files Added", f"Added {len(added_files)} file(s) to the queue.")
+    else:
+        messagebox.showwarning("No Audio Files", "No valid audio files found in the dropped item(s).")
+
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -596,7 +637,12 @@ def format_time(seconds):
     sec = int(seconds) % 60
     return f"{minutes}:{sec:02d}"
 
-root = Tk()
+# Create root window with drag and drop support if available
+if tkinterdnd:
+    root = tkinterdnd.Tk()
+else:
+    root = Tk()
+
 root.title(" KaoS Tunes 🎸")
 width = 700
 height = 560
@@ -800,6 +846,11 @@ w.grid(row=0, column=1, sticky=NSEW)
 
 listbox.config(yscrollcommand=w.set)
 w.pack(side="right", fill="y")
+
+# Register drag and drop if tkinterdnd is available
+if tkinterdnd and DND_FILES:
+    listbox.drop_target_register(DND_FILES)
+    listbox.dnd_bind('<<Drop>>', handle_drop)
 
 
 # create the llama's head
